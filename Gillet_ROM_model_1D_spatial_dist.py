@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Sep 12 10:26:15 2025
+
+@author: francisbrain4
+"""
+
+"""
+Complete ROM (Reduced Order Modeling) for 1D Heat Equation
+Author: Francis Gillet
+Date: September 12, 2025
+
+NOTES:
+==================================
+1. MATRIX A: Represents spatial derivatives, NEVER changes with time
+   - Rows = spatial locations (x₀, x₁, x₂, ...)
+   - Columns = temperature unknowns at those locations
+   - Tridiagonal pattern from finite difference: d²T/dx² ≈ (T[i-1] - 2T[i] + T[i+1])/dx²
+
+2. TIME SNAPSHOTS: Each column of data matrix = temperature at one time
+   - Time loop solves A×T = -q at each time step
+   - Data matrix Xh: rows = spatial points, columns = time steps
+   - Each solve gives one "snapshot" of temperature distribution
+
+3. SVD: Finds dominant patterns in temperature evolution
+   - U columns = spatial modes (how temperature varies in space)
+   - S values = importance of each mode (energy content)
+   - VT rows = temporal modes (how spatial patterns evolve in time)
+
+4. ROM: Uses few dominant modes instead of full solution
+   - Instead of 1000×1000 system → solve 7×7 system
+   - T(x,t) ≈ Φ × a(t) where Φ = spatial modes, a = time coefficients
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import spsolve
+
+# ================================
+# PROBLEM SETUP
+# ================================
+
+# Physical parameters
+q0 = 1e3        # Heat source intensity [W/m³]
+Lx = 1          # Rod length [m] 
+Lt = 100        # Total time [s]
+
+# Discretization
+Nx = 501        # Number of spatial points
+Nt = 1000       # Number of time steps
+
+# Create grids
+x = np.linspace(0, Lx, Nx)
+t = np.linspace(0, Lt, Nt)
+dx = x[1] - x[0]
+dt = t[1] - t[0]
+
+print(f"Grid: {Nx} spatial points, {Nt} time steps")
+print(f"dx = {dx:.6f}, dt = {dt:.3f}")
+
+# ================================
+# HEAT SOURCE DISTRIBUTIONS
+# ================================
+
+def hertz_distribution(x, a, q_max, velocity, time):
+    """
+    Hertz (semicircular) heat distribution - like a welding torch
+    
+    PHYSICAL MEANING: Models contact heating with curved intensity profile
+    """
+    x0 = velocity * time  # Current position of heat source
+    r = np.abs(x - x0)    # Distance from heat source center
+    
+    # Hertz formula: semicircular distribution
+    q_distribution = np.where(r <= a, 
+                             q_max * np.sqrt(1.0001 - (r / a)**2), 
+                             0)
+    return q_distribution
+
+def tent_distribution(x, a, q_max, velocity, time):
+    """
+    Tent (triangular) heat distribution - simpler model
+    
+    PHYSICAL MEANING: Linear drop-off from center, easier to analyze
+    """
+    x0 = velocity * time  # Current position of heat source
+    r = np.abs(x - x0)    # Distance from heat source center
+    
+    # Tent formula: triangular distribution
+    q_distribution = np.where(r <= a, 
+                             q_max * (1 - r / a), 
+                             0)
+    return q_distribution
+
+# Heat source parameters
+body_width = Lx / 10      # Heat source width (10% of domain)
+velocity = Lx / Lt        # Heat source velocity (travels full length)
+
+print(f"Heat source width: {body_width:.3f} m")
+print(f"Heat source velocity: {velocity:.3f} m/s")
+
+# ================================
+# FINITE DIFFERENCE MATRIX SETUP
+# ================================
+# TUTORIAL INSIGHT: This matrix represents d²T/dx² = -q spatially
+# Each row = equation at one spatial point
+# Pattern: T[i-1] - 2T[i] + T[i+1] = -q[i] * dx²
+
+A = np.zeros((Nx-1, Nx-1))
+
+# Build tridiagonal matrix for d²T/dx²
+np.fill_diagonal(A, -2)           # Main diagonal: coefficient of T[i]
+np.fill_diagonal(A[:, 1:], 1)     # Upper diagonal: coefficient of T[i+1]  
+np.fill_diagonal(A[1:, :], 1)     # Lower diagonal: coefficient of T[i-1]
+
+# Boundary conditions
+A[0, 1] = 2     # dT/dx = 0 at x=0 (insulated left boundary)
+# Right boundary T=0 is handled by excluding last node
+
+# Scale by dx²
+A = A / (dx**2)
+
+# Convert to sparse matrix for speed
+As = csr_matrix(A, shape=(Nx-1, Nx-1))
+
+print("Finite difference matrix A created")
+print(f"Matrix size: {A.shape} (excludes right boundary node)")
+
+# ================================
+# GENERATE TRAINING DATA (TENT)
+# ================================
+# TUTORIAL INSIGHT: Each column = temperature snapshot at one time
+# This creates the data matrix for SVD
+
+print("\nGenerating training data using TENT distribution...")
+
+qt = np.zeros(Nx-1)           # Heat source vector
+Xt = np.zeros((Nx, Nt))       # Data matrix: rows=space, cols=time
+
+for i in range(Nt):
+    # Update heat source position at each time step
+    for j in range(Nx-2):  # Exclude last node (boundary condition)
+        qt[j] = tent_distribution(x[j], body_width, q0, velocity, t[i])
+    
+    # Solve heat equation: A * T = -q
+    # TUTORIAL INSIGHT: Same matrix A, different q at each time
+    xt = spsolve(As, -qt)
+    
+    # Store snapshot in column i
+    # TUTORIAL INSIGHT: Column i = complete temperature distribution at time i
+    Xt[:-1, i] = xt  # Fill all but last row (boundary T=0)
+    Xt[-1, i] = 0    # Right boundary condition
+
+print(f"Training data generated: {Xt.shape} (space × time)")
+
+# ================================
+# SVD ANALYSIS
+# ================================
+# TUTORIAL INSIGHT: Find dominant spatial-temporal patterns
+# U = spatial modes, S = importance, VT = temporal evolution
+
+print("\nPerforming SVD analysis...")
+
+Uec, Sec, VTec = np.linalg.svd(Xt, full_matrices=False)
+
+print(f"SVD completed: U={Uec.shape}, S={Sec.shape}, VT={VTec.shape}")
+print(f"First 10 singular values: {Sec[:10]}")
+
+# Plot singular values to see energy distribution
+plt.figure(figsize=(10, 6))
+plt.semilogy(Sec, 'bo-', linewidth=2, markersize=4)
+plt.title('Singular Values (Energy Content of Each Mode)')
+plt.xlabel('Mode Number')
+plt.ylabel('Singular Value')
+plt.grid(True)
+plt.show()
+
+# Plot first few spatial modes
+plt.figure(figsize=(12, 8))
+plt.plot(x, Uec[:, 0], 'r-', linewidth=2, label='1st mode')
+plt.plot(x, Uec[:, 1], 'b-', linewidth=2, label='2nd mode')
+plt.plot(x, Uec[:, 2], 'g-', linewidth=2, label='3rd mode')
+plt.title('Dominant Spatial Modes from SVD')
+plt.xlabel('Position x [m]')
+plt.ylabel('Mode Amplitude')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ================================
+# ROM SETUP
+# ================================
+# TUTORIAL INSIGHT: Use first Nr modes as basis functions
+# Instead of 1000 unknowns → Nr unknowns (typically 5-20)
+
+# ROM parameters - try different values!
+Nr_values = [7, 15, 200]  # Number of modes to test
+time_snapshots = [10, 50, 70]  # % of time to compare results
+
+print(f"\nSetting up ROM with modes: {Nr_values}")
+
+def setup_rom(Nr, Uec, x):
+    """
+    Set up ROM matrices for given number of modes
+    
+    TUTORIAL INSIGHT: 
+    - Phi = spatial basis (first Nr columns of U)
+    - d2Phi_dx2 = second derivatives of basis functions
+    - A_rom = projected differential operator (Nr×Nr instead of Nx×Nx)
+    """
+    # Build spatial basis from dominant SVD modes
+    Phi = np.zeros((Nx, Nr))
+    for i in range(Nr):
+        Phi[:, i] = Uec[:, i]
+    
+    # Compute second derivatives of basis functions
+    d2Phi_dx2 = np.zeros((Nx, Nr))
+    for i in range(Nr):
+        dPhi_dx = np.gradient(Phi[:, i], x)
+        d2Phi_dx2[:, i] = np.gradient(dPhi_dx, x)
+    
+    return Phi, d2Phi_dx2
+
+# ================================
+# ROM SOLUTION FUNCTION
+# ================================
+
+def solve_rom(Nr, Uec, x, t, time_snapshots):
+    """
+    Solve heat equation using ROM with Nr modes
+    
+    TUTORIAL INSIGHT:
+    1. Project differential operator: A_rom = d2Phi_dx2.T @ d2Phi_dx2
+    2. At each time: solve A_rom * a = -d2Phi_dx2.T @ q
+    3. Reconstruct: T = Phi @ a
+    """
+    
+    Phi, d2Phi_dx2 = setup_rom(Nr, Uec, x)
+    
+    # ROM differential operator (Nr×Nr matrix)
+    A_rom = (d2Phi_dx2).T @ d2Phi_dx2
+    
+    print(f"  ROM matrix size: {A_rom.shape} (vs full size {Nx-1}×{Nx-1})")
+    
+    # Storage for results at selected time snapshots
+    ns = (np.array(time_snapshots) / 100 * Nt).astype(int)
+    Xrh_select = np.zeros((Nx, len(time_snapshots)))
+    
+    # Time-stepping loop
+    qh = np.zeros(Nx)
+    for i in range(Nt):
+        # Generate Hertz heat source at current time
+        for j in range(Nx-1):
+            qh[j] = hertz_distribution(x[j], body_width, q0, velocity, t[i])
+        
+        # Project heat source onto ROM space
+        # TUTORIAL INSIGHT: Instead of solving for all temperatures,
+        # solve for coefficients of dominant modes
+        q_rom = (d2Phi_dx2).T @ qh
+        
+        # Solve ROM system (small Nr×Nr system!)
+        a_rom = np.linalg.solve(A_rom, -q_rom)
+        
+        # Reconstruct full temperature field
+        # TUTORIAL INSIGHT: T ≈ a₁×Mode₁ + a₂×Mode₂ + ... + aₙ×Modeₙ
+        T_full = Phi @ a_rom
+        
+        # Store selected snapshots
+        if i in ns:
+            idx = np.where(ns == i)[0][0]
+            Xrh_select[:, idx] = T_full
+    
+    return Xrh_select
+
+# ================================
+# GENERATE REFERENCE SOLUTION (HERTZ)
+# ================================
+# Full solution using Hertz distribution for comparison
+
+print("\nGenerating reference solution using HERTZ distribution...")
+
+qh = np.zeros(Nx-1)
+Xh = np.zeros((Nx, Nt))
+
+for i in range(Nt):
+    # Generate Hertz heat source
+    for j in range(Nx-2):
+        qh[j] = hertz_distribution(x[j], body_width, q0, velocity, t[i])
+    
+    # Solve full system
+    xh = spsolve(As, -qh)
+    Xh[:-1, i] = xh
+    Xh[-1, i] = 0
+
+print("Reference solution completed")
+
+# ================================
+# ROM SOLUTIONS AND COMPARISON
+# ================================
+
+print("\nSolving ROM for different numbers of modes...")
+
+# Storage for ROM results
+Xrh_all = np.zeros((Nx, len(time_snapshots), len(Nr_values)))
+
+# Solve ROM for each mode count
+for ir, Nr in enumerate(Nr_values):
+    print(f"\nSolving ROM with {Nr} modes...")
+    Xrh_all[:, :, ir] = solve_rom(Nr, Uec, x, t, time_snapshots)
+
+# ================================
+# RESULTS VISUALIZATION
+# ================================
+
+print("\nGenerating comparison plots...")
+
+# Compare ROM vs Full solution at different times
+colors = ['r', 'g', 'b']
+ns = (np.array(time_snapshots) / 100 * Nt).astype(int)
+
+for i, time_pct in enumerate(time_snapshots):
+    plt.figure(figsize=(12, 8))
+    
+    # Full solution
+    plt.plot(x, Xh[:, ns[i]], 'k-', linewidth=3, label='Full Solution (Hertz)')
+    
+    # ROM solutions
+    for ir, Nr in enumerate(Nr_values):
+        error = Xh[:, ns[i]] - Xrh_all[:, i, ir]
+        plt.plot(x, Xrh_all[:, i, ir], f'{colors[ir]}--', linewidth=2, 
+                label=f'ROM {Nr} modes')
+        plt.plot(x, error, f'{colors[ir]}:', linewidth=1, alpha=0.7,
+                label=f'Error {Nr} modes')
+    
+    plt.title(f'ROM Comparison at {time_pct}% of Total Time')
+    plt.xlabel('Position x [m]')
+    plt.ylabel('Temperature [K]')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+# Summary plot: Temperature evolution at different times
+plt.figure(figsize=(12, 8))
+for i, time_pct in enumerate(time_snapshots):
+    plt.plot(x, Xh[:, ns[i]], linewidth=2, label=f'{time_pct}% elapsed time')
+
+plt.title('Full Solution: Temperature Evolution Over Time')
+plt.xlabel('Position x [m]')
+plt.ylabel('Temperature [K]')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ================================
+# SUMMARY
+# ================================
+
+print("\n" + "="*60)
+print("ROM SUMMARY")
+print("="*60)
+print(f"Original problem size: {Nx-1}×{Nx-1} = {(Nx-1)**2:,} unknowns")
+for Nr in Nr_values:
+    reduction = (Nx-1)**2 / Nr**2
+    print(f"ROM with {Nr} modes: {Nr}×{Nr} = {Nr**2} unknowns (reduction: {reduction:.0f}×)")
+
+print("\nKEY INSIGHTS FROM OUR TUTORIAL:")
+print("1. Matrix A represents spatial derivatives only - never changes")
+print("2. Time snapshots are columns of data matrix")
+print("3. SVD finds dominant spatial-temporal patterns") 
+print("4. ROM uses few modes instead of all spatial points")
+print("5. Training on tent data works for Hertz prediction!")
+print("="*60)

@@ -1,0 +1,17 @@
+# ROM Problem Parameters
+# Date: 2025-09-13 00:46:23.154099
+
+# Physical parameters
+q0 = 1000.0
+Lx = 1
+Lt = 100
+
+# Discretization
+Nx = 501
+Nt = 1000
+dx = 0.002000
+dt = 0.100
+
+# Heat source parameters
+body_width = 0.100
+velocity = 0.010

@@ -1,0 +1,15 @@
+ROM Surrogate Model Summary
+==========================
+Generated: 2025-09-12 11:58:30
+
+ROM Configuration:
+- Spatial points: 501
+- Domain length: 1.000 m
+- ROM modes: 7
+- Energy captured: 100.00%
+- Speedup factor: ~5122x
+
+Capabilities:
+- Predicts any moving heat source type
+- Fast parameter sweeps for optimization
+- Real-time capable predictions
