@@ -1,2 +1,5 @@
 heat_rom_env/
 rom_env/
+heat_rom_env/
+rom_env/
+__pycache__/
